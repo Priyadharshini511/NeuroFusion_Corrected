@@ -1,0 +1,2546 @@
+1:"""
+2:NeuroFusion AI
+3:Experiment 02 - 3D sMRI CNN with Mild Spatial Augmentation
+4:
+5:Controlled experiment:
+6:    Baseline BatchNorm3D CNN
+7:    + training-only spatial augmentation
+8:
+9:Augmentation:
+10:    - Random left-right flip, p=0.5
+11:    - Random 3D rotation, +/- 5 degrees
+12:    - Random 3D translation, +/- 3 voxels
+13:
+14:Validation and outer-test data are NEVER augmented.
+15:
+16:The baseline training script is intentionally left untouched.
+17:"""
+18:
+19:from pathlib import Path
+20:import sys
+21:import random
+22:
+23:import numpy as np
+24:import pandas as pd
+25:
+26:import torch
+27:import torch.nn as nn
+28:
+29:from torch.utils.data import Dataset, DataLoader
+30:
+31:from sklearn.metrics import (
+32:    accuracy_score,
+33:    balanced_accuracy_score,
+34:    precision_score,
+35:    recall_score,
+36:    f1_score,
+37:    roc_auc_score,
+38:)
+39:
+40:# ------------------------------------------------------------
+41:# PATH SETUP
+42:# ------------------------------------------------------------
+43:
+44:PROJECT_ROOT = Path(__file__).resolve().parents[2]
+45:
+46:SRC_DIR = PROJECT_ROOT / "src"
+47:
+48:if str(SRC_DIR) not in sys.path:
+49:    sys.path.insert(0, str(SRC_DIR))
+50:
+51:EXP_DIR = Path(__file__).resolve().parent
+52:
+53:sys.path.insert(
+54:    0,
+55:    str(EXP_DIR),
+56:)
+57:
+58:from smri_3d_cnn import SMRI3DCNN
+59:
+60:from smri_augmentation import (
+61:    apply_training_augmentation,
+62:)
+63:
+64:
+65:# ============================================================
+66:# CONFIGURATION
+67:# ============================================================
+68:
+69:EXPERIMENT_NAME = "exp02_augmentation"
+70:
+71:IMAGE_DIR = (
+72:    PROJECT_ROOT
+73:    / "processed_data"
+74:    / "smri"
+75:    / "cnn_dataset"
+76:    / "images"
+77:)
+78:
+79:MANIFEST_PATH = (
+80:    PROJECT_ROOT
+81:    / "processed_data"
+82:    / "smri"
+83:    / "dataset"
+84:    / "smri_subject_manifest_labeled.csv"
+85:)
+86:
+87:NESTED_ASSIGNMENT_PATH = (
+88:    PROJECT_ROOT
+89:    / "processed_data"
+90:    / "smri"
+91:    / "cnn_dataset"
+92:    / "cross_validation"
+93:    / "nested"
+94:    / "nested_cv_assignments.csv"
+95:)
+96:
+97:OUTPUT_DIR = (
+98:    PROJECT_ROOT
+99:    / "processed_data"
+100:    / "smri"
+101:    / "cnn_dataset"
+102:    / "experiments"
+103:    / EXPERIMENT_NAME
+104:    / "training_full_5x4"
+105:)
+106:
+107:OUTPUT_DIR.mkdir(
+108:    parents=True,
+109:    exist_ok=True,
+110:)
+111:
+112:
+113:# ============================================================
+114:# EXPERIMENT SETTINGS
+115:# ============================================================
+116:
+117:RANDOM_SEED = 42
+118:
+119:OUTER_FOLDS = 5
+120:INNER_FOLDS = 4
+121:
+122:BATCH_SIZE = 4
+123:
+124:NUM_EPOCHS = 50
+125:
+126:LEARNING_RATE = 1e-4
+127:
+128:WEIGHT_DECAY = 1e-4
+129:
+130:DROPOUT = 0.30
+131:
+132:EARLY_STOPPING_PATIENCE = 10
+133:
+134:THRESHOLD = 0.50
+135:
+136:NUM_WORKERS = 0
+137:
+138:EXPECTED_TENSOR_SHAPE = (
+139:    1,
+140:    95,
+141:    117,
+142:    99,
+143:)
+144:
+145:
+146:# ============================================================
+147:# DEVICE
+148:# ============================================================
+149:
+150:DEVICE = torch.device(
+151:    "cuda"
+152:    if torch.cuda.is_available()
+153:    else "cpu"
+154:)
+155:
+156:
+157:# ============================================================
+158:# REPRODUCIBILITY
+159:# ============================================================
+160:
+161:def set_seed(seed):
+162:
+163:    random.seed(seed)
+164:
+165:    np.random.seed(seed)
+166:
+167:    torch.manual_seed(seed)
+168:
+169:    if torch.cuda.is_available():
+170:
+171:        torch.cuda.manual_seed_all(
+172:            seed
+173:        )
+174:
+175:    torch.backends.cudnn.deterministic = True
+176:
+177:    torch.backends.cudnn.benchmark = False
+178:
+179:
+180:# ============================================================
+181:# DATASET
+182:# ============================================================
+183:
+184:class SMRIDataset(Dataset):
+185:
+186:    def __init__(
+187:        self,
+188:        dataframe,
+189:        image_dir,
+190:        augment=False,
+191:    ):
+192:
+193:        self.dataframe = (
+194:            dataframe
+195:            .reset_index(drop=True)
+196:            .copy()
+197:        )
+198:
+199:        self.image_dir = Path(
+200:            image_dir
+201:        )
+202:
+203:        self.augment = bool(
+204:            augment
+205:        )
+206:
+207:    def __len__(self):
+208:
+209:        return len(
+210:            self.dataframe
+211:        )
+212:
+213:    def __getitem__(self, index):
+214:
+215:        row = self.dataframe.iloc[
+216:            index
+217:        ]
+218:
+219:        subject_id = str(
+220:            row["subject_id"]
+221:        )
+222:
+223:        label = float(
+224:            row["label"]
+225:        )
+226:
+227:        image_path = (
+228:            self.image_dir
+229:            / f"{subject_id}.npy"
+230:        )
+231:
+232:        if not image_path.exists():
+233:
+234:            raise FileNotFoundError(
+235:                f"Tensor not found: "
+236:                f"{image_path}"
+237:            )
+238:
+239:        image = np.load(
+240:            image_path
+241:        ).astype(
+242:            np.float32,
+243:            copy=False,
+244:        )
+245:
+246:        if tuple(image.shape) != (
+247:            EXPECTED_TENSOR_SHAPE
+248:        ):
+249:
+250:            raise RuntimeError(
+251:                f"Unexpected tensor shape "
+252:                f"for {subject_id}: "
+253:                f"{image.shape}; expected "
+254:                f"{EXPECTED_TENSOR_SHAPE}"
+255:            )
+256:
+257:        # ----------------------------------------------------
+258:        # TRAINING-ONLY AUGMENTATION
+259:        # ----------------------------------------------------
+260:
+261:        if self.augment:
+262:
+263:            image = (
+264:                apply_training_augmentation(
+265:                    image
+266:                )
+267:            )
+268:
+269:        # ----------------------------------------------------
+270:        # Final validation
+271:        # ----------------------------------------------------
+272:
+273:        if tuple(image.shape) != (
+274:            EXPECTED_TENSOR_SHAPE
+275:        ):
+276:
+277:            raise RuntimeError(
+278:                f"Augmentation changed shape "
+279:                f"for {subject_id}: "
+280:                f"{image.shape}"
+281:            )
+282:
+283:        if not np.isfinite(
+284:            image
+285:        ).all():
+286:
+287:            raise RuntimeError(
+288:                f"Non-finite values after "
+289:                f"augmentation for "
+290:                f"{subject_id}"
+291:            )
+292:
+293:        if image.min() < 0.0:
+294:
+295:            raise RuntimeError(
+296:                f"Negative intensity after "
+297:                f"augmentation for "
+298:                f"{subject_id}"
+299:            )
+300:
+301:        if image.max() > 1.0:
+302:
+303:            raise RuntimeError(
+304:                f"Intensity > 1 after "
+305:                f"augmentation for "
+306:                f"{subject_id}"
+307:            )
+308:
+309:        image_tensor = torch.from_numpy(
+310:            image
+311:        )
+312:
+313:        label_tensor = torch.tensor(
+314:            [label],
+315:            dtype=torch.float32,
+316:        )
+317:
+318:        return (
+319:            image_tensor,
+320:            label_tensor,
+321:            subject_id,
+322:        )
+323:
+324:
+325:# ============================================================
+326:# METRICS
+327:# ============================================================
+328:
+329:def calculate_metrics(
+330:    labels,
+331:    probabilities,
+332:):
+333:
+334:    labels = np.asarray(
+335:        labels,
+336:        dtype=np.int64,
+337:    )
+338:
+339:    probabilities = np.asarray(
+340:        probabilities,
+341:        dtype=np.float64,
+342:    )
+343:
+344:    predictions = (
+345:        probabilities >= THRESHOLD
+346:    ).astype(np.int64)
+347:
+348:    accuracy = accuracy_score(
+349:        labels,
+350:        predictions,
+351:    )
+352:
+353:    balanced_accuracy = (
+354:        balanced_accuracy_score(
+355:            labels,
+356:            predictions,
+357:        )
+358:    )
+359:
+360:    precision = precision_score(
+361:        labels,
+362:        predictions,
+363:        zero_division=0,
+364:    )
+365:
+366:    recall = recall_score(
+367:        labels,
+368:        predictions,
+369:        zero_division=0,
+370:    )
+371:
+372:    f1 = f1_score(
+373:        labels,
+374:        predictions,
+375:        zero_division=0,
+376:    )
+377:
+378:    if len(
+379:        np.unique(labels)
+380:    ) == 2:
+381:
+382:        auc = roc_auc_score(
+383:            labels,
+384:            probabilities,
+385:        )
+386:
+387:    else:
+388:
+389:        auc = float("nan")
+390:
+391:    return {
+392:        "accuracy": float(
+393:            accuracy
+394:        ),
+395:        "balanced_accuracy": float(
+396:            balanced_accuracy
+397:        ),
+398:        "precision": float(
+399:            precision
+400:        ),
+401:        "recall": float(
+402:            recall
+403:        ),
+404:        "f1": float(
+405:            f1
+406:        ),
+407:        "auc": float(
+408:            auc
+409:        ),
+410:    }
+411:
+412:
+413:# ============================================================
+414:# LOSS
+415:# ============================================================
+416:
+417:def create_criterion(
+418:    dataframe,
+419:    device,
+420:):
+421:
+422:    labels = (
+423:        dataframe[
+424:            "label"
+425:        ]
+426:        .astype(int)
+427:        .to_numpy()
+428:    )
+429:
+430:    negative_count = int(
+431:        np.sum(
+432:            labels == 0
+433:        )
+434:    )
+435:
+436:    positive_count = int(
+437:        np.sum(
+438:            labels == 1
+439:        )
+440:    )
+441:
+442:    if (
+443:        negative_count == 0
+444:        or positive_count == 0
+445:    ):
+446:
+447:        raise RuntimeError(
+448:            "Training partition does not "
+449:            "contain both classes."
+450:        )
+451:
+452:    pos_weight_value = (
+453:        negative_count
+454:        / positive_count
+455:    )
+456:
+457:    pos_weight = torch.tensor(
+458:        [pos_weight_value],
+459:        dtype=torch.float32,
+460:        device=device,
+461:    )
+462:
+463:    criterion = (
+464:        nn.BCEWithLogitsLoss(
+465:            pos_weight=pos_weight
+466:        )
+467:    )
+468:
+469:    return (
+470:        criterion,
+471:        pos_weight_value,
+472:    )
+473:
+474:
+475:# ============================================================
+476:# TRAIN ONE EPOCH
+477:# ============================================================
+478:
+479:def train_one_epoch(
+480:    model,
+481:    loader,
+482:    criterion,
+483:    optimizer,
+484:    device,
+485:):
+486:
+487:    model.train()
+488:
+489:    running_loss = 0.0
+490:
+491:    labels_all = []
+492:
+493:    probabilities_all = []
+494:
+495:    subject_count = 0
+496:
+497:    for (
+498:        images,
+499:        labels,
+500:        _,
+501:    ) in loader:
+502:
+503:        images = images.to(
+504:            device,
+505:            non_blocking=True,
+506:        )
+507:
+508:        labels = labels.to(
+509:            device,
+510:            non_blocking=True,
+511:        )
+512:
+513:        optimizer.zero_grad(
+514:            set_to_none=True
+515:        )
+516:
+517:        logits = model(
+518:            images
+519:        )
+520:
+521:        loss = criterion(
+522:            logits,
+523:            labels,
+524:        )
+525:
+526:        loss.backward()
+527:
+528:        optimizer.step()
+529:
+530:        batch_size = images.size(
+531:            0
+532:        )
+533:
+534:        running_loss += (
+535:            loss.item()
+536:            * batch_size
+537:        )
+538:
+539:        subject_count += (
+540:            batch_size
+541:        )
+542:
+543:        probabilities = (
+544:            torch.sigmoid(
+545:                logits
+546:            )
+547:        )
+548:
+549:        labels_all.extend(
+550:            labels.detach()
+551:            .cpu()
+552:            .numpy()
+553:            .reshape(-1)
+554:            .tolist()
+555:        )
+556:
+557:        probabilities_all.extend(
+558:            probabilities.detach()
+559:            .cpu()
+560:            .numpy()
+561:            .reshape(-1)
+562:            .tolist()
+563:        )
+564:
+565:    if subject_count == 0:
+566:
+567:        raise RuntimeError(
+568:            "Training loader is empty."
+569:        )
+570:
+571:    epoch_loss = (
+572:        running_loss
+573:        / subject_count
+574:    )
+575:
+576:    metrics = calculate_metrics(
+577:        labels_all,
+578:        probabilities_all,
+579:    )
+580:
+581:    return (
+582:        epoch_loss,
+583:        metrics,
+584:    )
+585:
+586:
+587:# ============================================================
+588:# EVALUATION
+589:# ============================================================
+590:
+591:def evaluate(
+592:    model,
+593:    loader,
+594:    criterion,
+595:    device,
+596:):
+597:
+598:    model.eval()
+599:
+600:    running_loss = 0.0
+601:
+602:    labels_all = []
+603:
+604:    probabilities_all = []
+605:
+606:    subjects_all = []
+607:
+608:    subject_count = 0
+609:
+610:    with torch.no_grad():
+611:
+612:        for (
+613:            images,
+614:            labels,
+615:            subjects,
+616:        ) in loader:
+617:
+618:            images = images.to(
+619:                device,
+620:                non_blocking=True,
+621:            )
+622:
+623:            labels = labels.to(
+624:                device,
+625:                non_blocking=True,
+626:            )
+627:
+628:            logits = model(
+629:                images
+630:            )
+631:
+632:            loss = criterion(
+633:                logits,
+634:                labels,
+635:            )
+636:
+637:            batch_size = images.size(
+638:                0
+639:            )
+640:
+641:            running_loss += (
+642:                loss.item()
+643:                * batch_size
+644:            )
+645:
+646:            subject_count += (
+647:                batch_size
+648:            )
+649:
+650:            probabilities = (
+651:                torch.sigmoid(
+652:                    logits
+653:                )
+654:            )
+655:
+656:            labels_all.extend(
+657:                labels.cpu()
+658:                .numpy()
+659:                .reshape(-1)
+660:                .tolist()
+661:            )
+662:
+663:            probabilities_all.extend(
+664:                probabilities.cpu()
+665:                .numpy()
+666:                .reshape(-1)
+667:                .tolist()
+668:            )
+669:
+670:            subjects_all.extend(
+671:                list(subjects)
+672:            )
+673:
+674:    if subject_count == 0:
+675:
+676:        raise RuntimeError(
+677:            "Evaluation loader is empty."
+678:        )
+679:
+680:    epoch_loss = (
+681:        running_loss
+682:        / subject_count
+683:    )
+684:
+685:    metrics = calculate_metrics(
+686:        labels_all,
+687:        probabilities_all,
+688:    )
+689:
+690:    return (
+691:        epoch_loss,
+692:        metrics,
+693:        labels_all,
+694:        probabilities_all,
+695:        subjects_all,
+696:    )
+697:
+698:
+699:# ============================================================
+700:# CREATE LOADER
+701:# ============================================================
+702:
+703:def create_loader(
+704:    dataframe,
+705:    shuffle,
+706:    augment=False,
+707:):
+708:
+709:    dataset = SMRIDataset(
+710:        dataframe,
+711:        IMAGE_DIR,
+712:        augment=augment,
+713:    )
+714:
+715:    loader = DataLoader(
+716:        dataset,
+717:        batch_size=BATCH_SIZE,
+718:        shuffle=shuffle,
+719:        num_workers=NUM_WORKERS,
+720:        pin_memory=torch.cuda.is_available(),
+721:    )
+722:
+723:    return loader
+724:
+725:
+726:# ============================================================
+727:# TRAIN ONE INNER FOLD
+728:# ============================================================
+729:
+730:def train_inner_fold(
+731:    outer_fold,
+732:    inner_fold,
+733:    outer_df,
+734:    device,
+735:):
+736:
+737:    print()
+738:    print(
+739:        "-" * 72
+740:    )
+741:
+742:    print(
+743:        f"OUTER {outer_fold} | "
+744:        f"INNER {inner_fold}"
+745:    )
+746:
+747:    print(
+748:        "-" * 72
+749:    )
+750:
+751:    split_df = outer_df[
+752:        outer_df["inner_fold"]
+753:        == inner_fold
+754:    ].copy()
+755:
+756:    train_df = split_df[
+757:        split_df["role"]
+758:        == "INNER_TRAIN"
+759:    ].copy()
+760:
+761:    validation_df = split_df[
+762:        split_df["role"]
+763:        == "INNER_VALIDATION"
+764:    ].copy()
+765:
+766:    test_df = split_df[
+767:        split_df["role"]
+768:        == "OUTER_TEST"
+769:    ].copy()
+770:
+771:    train_ids = set(
+772:        train_df[
+773:            "subject_id"
+774:        ].astype(str)
+775:    )
+776:
+777:    validation_ids = set(
+778:        validation_df[
+779:            "subject_id"
+780:        ].astype(str)
+781:    )
+782:
+783:    test_ids = set(
+784:        test_df[
+785:            "subject_id"
+786:        ].astype(str)
+787:    )
+788:
+789:    # --------------------------------------------------------
+790:    # Partition validation
+791:    # --------------------------------------------------------
+792:
+793:    if train_ids.intersection(
+794:        validation_ids
+795:    ):
+796:
+797:        raise RuntimeError(
+798:            f"Outer {outer_fold}, "
+799:            f"Inner {inner_fold}: "
+800:            "train/validation overlap."
+801:        )
+802:
+803:    if train_ids.intersection(
+804:        test_ids
+805:    ):
+806:
+807:        raise RuntimeError(
+808:            f"Outer {outer_fold}, "
+809:            f"Inner {inner_fold}: "
+810:            "train/outer-test overlap."
+811:        )
+812:
+813:    if validation_ids.intersection(
+814:        test_ids
+815:    ):
+816:
+817:        raise RuntimeError(
+818:            f"Outer {outer_fold}, "
+819:            f"Inner {inner_fold}: "
+820:            "validation/outer-test overlap."
+821:        )
+822:
+823:    if (
+824:        len(train_ids)
+825:        + len(validation_ids)
+826:        + len(test_ids)
+827:        != len(
+828:            train_ids
+829:            | validation_ids
+830:            | test_ids
+831:        )
+832:    ):
+833:
+834:        raise RuntimeError(
+835:            "Partition union is invalid."
+836:        )
+837:
+838:    # --------------------------------------------------------
+839:    # Confirm complete outer partition
+840:    # --------------------------------------------------------
+841:
+842:    expected_outer_subjects = set(
+843:        outer_df[
+844:            "subject_id"
+845:        ].astype(str)
+846:    )
+847:
+848:    actual_subjects = (
+849:        train_ids
+850:        | validation_ids
+851:        | test_ids
+852:    )
+853:
+854:    if actual_subjects != (
+855:        expected_outer_subjects
+856:    ):
+857:
+858:        raise RuntimeError(
+859:            f"Outer {outer_fold}, "
+860:            f"Inner {inner_fold}: "
+861:            "partition does not cover "
+862:            "the outer fold."
+863:        )
+864:
+865:    # --------------------------------------------------------
+866:    # Class validation
+867:    # --------------------------------------------------------
+868:
+869:    for name, dataframe in [
+870:        (
+871:            "inner train",
+872:            train_df,
+873:        ),
+874:        (
+875:            "inner validation",
+876:            validation_df,
+877:        ),
+878:        (
+879:            "outer test",
+880:            test_df,
+881:        ),
+882:    ]:
+883:
+884:        classes = set(
+885:            dataframe[
+886:                "label"
+887:            ].astype(int)
+888:        )
+889:
+890:        if classes != {0, 1}:
+891:
+892:            raise RuntimeError(
+893:                f"Outer {outer_fold}, "
+894:                f"Inner {inner_fold}: "
+895:                f"{name} does not contain "
+896:                "both classes."
+897:            )
+898:
+899:    print(
+900:        f"Train: {len(train_df)} "
+901:        f"(0={(train_df['label'] == 0).sum()}, "
+902:        f"1={(train_df['label'] == 1).sum()})"
+903:    )
+904:
+905:    print(
+906:        f"Validation: {len(validation_df)} "
+907:        f"(0={(validation_df['label'] == 0).sum()}, "
+908:        f"1={(validation_df['label'] == 1).sum()})"
+909:    )
+910:
+911:    print(
+912:        f"Outer test: {len(test_df)}"
+913:    )
+914:
+915:    # --------------------------------------------------------
+916:    # Unique inner-run seed
+917:    # --------------------------------------------------------
+918:
+919:    run_seed = (
+920:        RANDOM_SEED
+921:        + outer_fold * 100
+922:        + inner_fold
+923:    )
+924:
+925:    set_seed(
+926:        run_seed
+927:    )
+928:
+929:    # --------------------------------------------------------
+930:    # DATA
+931:    #
+932:    # IMPORTANT:
+933:    # Training = augmentation ON
+934:    # Validation = augmentation OFF
+935:    # --------------------------------------------------------
+936:
+937:    train_loader = create_loader(
+938:        train_df,
+939:        shuffle=True,
+940:        augment=True,
+941:    )
+942:
+943:    validation_loader = create_loader(
+944:        validation_df,
+945:        shuffle=False,
+946:        augment=False,
+947:    )
+948:
+949:    # --------------------------------------------------------
+950:    # MODEL
+951:    # --------------------------------------------------------
+952:
+953:    model = SMRI3DCNN(
+954:        dropout=DROPOUT
+955:    ).to(device)
+956:
+957:    criterion, pos_weight_value = (
+958:        create_criterion(
+959:            train_df,
+960:            device,
+961:        )
+962:    )
+963:
+964:    optimizer = torch.optim.AdamW(
+965:        model.parameters(),
+966:        lr=LEARNING_RATE,
+967:        weight_decay=WEIGHT_DECAY,
+968:    )
+969:
+970:    scheduler = (
+971:        torch.optim.lr_scheduler.ReduceLROnPlateau(
+972:            optimizer,
+973:            mode="max",
+974:            factor=0.5,
+975:            patience=4,
+976:            min_lr=1e-6,
+977:        )
+978:    )
+979:
+980:    best_auc = -np.inf
+981:
+982:    best_epoch = 0
+983:
+984:    epochs_without_improvement = 0
+985:
+986:    history = []
+987:
+988:    # --------------------------------------------------------
+989:    # TRAIN INNER MODEL
+990:    # --------------------------------------------------------
+991:
+992:    for epoch in range(
+993:        1,
+994:        NUM_EPOCHS + 1,
+995:    ):
+996:
+997:        (
+998:            train_loss,
+999:            train_metrics,
+1000:        ) = train_one_epoch(
+1001:            model,
+1002:            train_loader,
+1003:            criterion,
+1004:            optimizer,
+1005:            device,
+1006:        )
+1007:
+1008:        (
+1009:            validation_loss,
+1010:            validation_metrics,
+1011:            _,
+1012:            _,
+1013:            _,
+1014:        ) = evaluate(
+1015:            model,
+1016:            validation_loader,
+1017:            criterion,
+1018:            device,
+1019:        )
+1020:
+1021:        validation_auc = (
+1022:            validation_metrics[
+1023:                "auc"
+1024:            ]
+1025:        )
+1026:
+1027:        scheduler.step(
+1028:            validation_auc
+1029:        )
+1030:
+1031:        current_lr = (
+1032:            optimizer.param_groups[0]["lr"]
+1033:        )
+1034:
+1035:        history.append(
+1036:            {
+1037:                "outer_fold":
+1038:                    outer_fold,
+1039:
+1040:                "inner_fold":
+1041:                    inner_fold,
+1042:
+1043:                "epoch":
+1044:                    epoch,
+1045:
+1046:                "learning_rate":
+1047:                    current_lr,
+1048:
+1049:                "train_loss":
+1050:                    train_loss,
+1051:
+1052:                "train_auc":
+1053:                    train_metrics["auc"],
+1054:
+1055:                "validation_loss":
+1056:                    validation_loss,
+1057:
+1058:                "validation_auc":
+1059:                    validation_auc,
+1060:            }
+1061:        )
+1062:
+1063:        print(
+1064:            f"Epoch {epoch:03d}/"
+1065:            f"{NUM_EPOCHS} | "
+1066:            f"Train AUC "
+1067:            f"{train_metrics['auc']:.4f} | "
+1068:            f"Val AUC "
+1069:            f"{validation_auc:.4f}"
+1070:        )
+1071:
+1072:        if validation_auc > best_auc:
+1073:
+1074:            best_auc = validation_auc
+1075:
+1076:            best_epoch = epoch
+1077:
+1078:            epochs_without_improvement = 0
+1079:
+1080:        else:
+1081:
+1082:            epochs_without_improvement += 1
+1083:
+1084:        if (
+1085:            epochs_without_improvement
+1086:            >= EARLY_STOPPING_PATIENCE
+1087:        ):
+1088:
+1089:            print(
+1090:                f"Early stopping at "
+1091:                f"epoch {epoch}"
+1092:            )
+1093:
+1094:            break
+1095:
+1096:    print(
+1097:        f"Best inner validation AUC: "
+1098:        f"{best_auc:.6f}"
+1099:    )
+1100:
+1101:    print(
+1102:        f"Best epoch: "
+1103:        f"{best_epoch}"
+1104:    )
+1105:
+1106:    result = {
+1107:        "outer_fold":
+1108:            outer_fold,
+1109:
+1110:        "inner_fold":
+1111:            inner_fold,
+1112:
+1113:        "best_epoch":
+1114:            best_epoch,
+1115:
+1116:        "best_validation_auc":
+1117:            best_auc,
+1118:
+1119:        "best_validation_loss":
+1120:            float(
+1121:                min(
+1122:                    row[
+1123:                        "validation_loss"
+1124:                    ]
+1125:                    for row in history
+1126:                )
+1127:            ),
+1128:
+1129:        "train_subjects":
+1130:            len(train_df),
+1131:
+1132:        "validation_subjects":
+1133:            len(validation_df),
+1134:
+1135:        "pos_weight":
+1136:            pos_weight_value,
+1137:
+1138:        "random_seed":
+1139:            run_seed,
+1140:    }
+1141:
+1142:    history_df = pd.DataFrame(
+1143:        history
+1144:    )
+1145:
+1146:    return (
+1147:        result,
+1148:        history_df,
+1149:    )
+1150:
+1151:
+1152:# ============================================================
+1153:# SELECT EPOCH FROM ALL FOUR INNER FOLDS
+1154:# ============================================================
+1155:
+1156:def select_epoch(
+1157:    inner_results,
+1158:    outer_fold,
+1159:):
+1160:
+1161:    fold_results = [
+1162:        result
+1163:        for result in inner_results
+1164:        if result[
+1165:            "outer_fold"
+1166:        ] == outer_fold
+1167:    ]
+1168:
+1169:    if len(fold_results) != (
+1170:        INNER_FOLDS
+1171:    ):
+1172:
+1173:        raise RuntimeError(
+1174:            f"Outer fold {outer_fold}: "
+1175:            f"expected {INNER_FOLDS} "
+1176:            f"inner results, found "
+1177:            f"{len(fold_results)}."
+1178:        )
+1179:
+1180:    best_epochs = [
+1181:        result[
+1182:            "best_epoch"
+1183:        ]
+1184:        for result in fold_results
+1185:    ]
+1186:
+1187:    selected_epoch = int(
+1188:        round(
+1189:            np.median(
+1190:                best_epochs
+1191:            )
+1192:        )
+1193:    )
+1194:
+1195:    selected_epoch = max(
+1196:        1,
+1197:        min(
+1198:            selected_epoch,
+1199:            NUM_EPOCHS,
+1200:        ),
+1201:    )
+1202:
+1203:    return selected_epoch
+1204:
+1205:
+1206:# ============================================================
+1207:# TRAIN FINAL OUTER MODEL
+1208:# ============================================================
+1209:
+1210:def train_final_outer_model(
+1211:    outer_fold,
+1212:    outer_df,
+1213:    selected_epoch,
+1214:    device,
+1215:):
+1216:
+1217:    print()
+1218:    print(
+1219:        "=" * 72
+1220:    )
+1221:
+1222:    print(
+1223:        f"FINAL OUTER MODEL {outer_fold}"
+1224:    )
+1225:
+1226:    print(
+1227:        "=" * 72
+1228:    )
+1229:
+1230:    # --------------------------------------------------------
+1231:    # Outer train/test
+1232:    # --------------------------------------------------------
+1233:
+1234:    outer_test_df = (
+1235:        outer_df[
+1236:            outer_df["role"]
+1237:            == "OUTER_TEST"
+1238:        ]
+1239:        .drop_duplicates(
+1240:            subset=["subject_id"]
+1241:        )
+1242:        .copy()
+1243:    )
+1244:
+1245:    outer_train_df = (
+1246:        outer_df[
+1247:            outer_df["role"]
+1248:            != "OUTER_TEST"
+1249:        ]
+1250:        .drop_duplicates(
+1251:            subset=["subject_id"]
+1252:        )
+1253:        .copy()
+1254:    )
+1255:
+1256:    train_ids = set(
+1257:        outer_train_df[
+1258:            "subject_id"
+1259:        ].astype(str)
+1260:    )
+1261:
+1262:    test_ids = set(
+1263:        outer_test_df[
+1264:            "subject_id"
+1265:        ].astype(str)
+1266:    )
+1267:
+1268:    if train_ids.intersection(
+1269:        test_ids
+1270:    ):
+1271:
+1272:        raise RuntimeError(
+1273:            f"Outer fold {outer_fold}: "
+1274:            "final train/test overlap."
+1275:        )
+1276:
+1277:    if len(
+1278:        train_ids | test_ids
+1279:    ) != len(
+1280:        set(
+1281:            outer_df[
+1282:                "subject_id"
+1283:            ].astype(str)
+1284:        )
+1285:    ):
+1286:
+1287:        raise RuntimeError(
+1288:            f"Outer fold {outer_fold}: "
+1289:            "final train/test partition "
+1290:            "invalid."
+1291:        )
+1292:
+1293:    if set(
+1294:        outer_train_df[
+1295:            "label"
+1296:        ].astype(int)
+1297:    ) != {0, 1}:
+1298:
+1299:        raise RuntimeError(
+1300:            f"Outer fold {outer_fold}: "
+1301:            "final outer training does "
+1302:            "not contain both classes."
+1303:        )
+1304:
+1305:    if set(
+1306:        outer_test_df[
+1307:            "label"
+1308:        ].astype(int)
+1309:    ) != {0, 1}:
+1310:
+1311:        raise RuntimeError(
+1312:            f"Outer fold {outer_fold}: "
+1313:            "outer test does not contain "
+1314:            "both classes."
+1315:        )
+1316:
+1317:    print(
+1318:        f"Full outer training: "
+1319:        f"{len(outer_train_df)}"
+1320:    )
+1321:
+1322:    print(
+1323:        f"Outer test: "
+1324:        f"{len(outer_test_df)}"
+1325:    )
+1326:
+1327:    print(
+1328:        f"Selected epoch: "
+1329:        f"{selected_epoch}"
+1330:    )
+1331:
+1332:    # --------------------------------------------------------
+1333:    # Final outer seed
+1334:    # --------------------------------------------------------
+1335:
+1336:    final_seed = (
+1337:        RANDOM_SEED
+1338:        + outer_fold * 1000
+1339:    )
+1340:
+1341:    set_seed(
+1342:        final_seed
+1343:    )
+1344:
+1345:    # --------------------------------------------------------
+1346:    # DATA
+1347:    #
+1348:    # Training = augmentation ON
+1349:    # Outer test = augmentation OFF
+1350:    # --------------------------------------------------------
+1351:
+1352:    train_loader = create_loader(
+1353:        outer_train_df,
+1354:        shuffle=True,
+1355:        augment=True,
+1356:    )
+1357:
+1358:    test_loader = create_loader(
+1359:        outer_test_df,
+1360:        shuffle=False,
+1361:        augment=False,
+1362:    )
+1363:
+1364:    # --------------------------------------------------------
+1365:    # MODEL
+1366:    # --------------------------------------------------------
+1367:
+1368:    model = SMRI3DCNN(
+1369:        dropout=DROPOUT
+1370:    ).to(device)
+1371:
+1372:    criterion, pos_weight_value = (
+1373:        create_criterion(
+1374:            outer_train_df,
+1375:            device,
+1376:        )
+1377:    )
+1378:
+1379:    optimizer = torch.optim.AdamW(
+1380:        model.parameters(),
+1381:        lr=LEARNING_RATE,
+1382:        weight_decay=WEIGHT_DECAY,
+1383:    )
+1384:
+1385:    scheduler = (
+1386:        torch.optim.lr_scheduler.ReduceLROnPlateau(
+1387:            optimizer,
+1388:            mode="min",
+1389:            factor=0.5,
+1390:            patience=4,
+1391:            min_lr=1e-6,
+1392:        )
+1393:    )
+1394:
+1395:    history = []
+1396:
+1397:    # --------------------------------------------------------
+1398:    # FINAL OUTER TRAINING
+1399:    # --------------------------------------------------------
+1400:
+1401:    for epoch in range(
+1402:        1,
+1403:        selected_epoch + 1,
+1404:    ):
+1405:
+1406:        (
+1407:            train_loss,
+1408:            train_metrics,
+1409:        ) = train_one_epoch(
+1410:            model,
+1411:            train_loader,
+1412:            criterion,
+1413:            optimizer,
+1414:            device,
+1415:        )
+1416:
+1417:        scheduler.step(
+1418:            train_loss
+1419:        )
+1420:
+1421:        history.append(
+1422:            {
+1423:                "outer_fold":
+1424:                    outer_fold,
+1425:
+1426:                "epoch":
+1427:                    epoch,
+1428:
+1429:                "train_loss":
+1430:                    train_loss,
+1431:
+1432:                "train_auc":
+1433:                    train_metrics["auc"],
+1434:
+1435:                "learning_rate":
+1436:                    optimizer.param_groups[0]["lr"],
+1437:            }
+1438:        )
+1439:
+1440:        print(
+1441:            f"Epoch {epoch:03d}/"
+1442:            f"{selected_epoch} | "
+1443:            f"Train Loss "
+1444:            f"{train_loss:.4f} | "
+1445:            f"Train AUC "
+1446:            f"{train_metrics['auc']:.4f}"
+1447:        )
+1448:
+1449:    # --------------------------------------------------------
+1450:    # OUTER TEST
+1451:    # --------------------------------------------------------
+1452:
+1453:    (
+1454:        test_loss,
+1455:        test_metrics,
+1456:        test_labels,
+1457:        test_probabilities,
+1458:        test_subjects,
+1459:    ) = evaluate(
+1460:        model,
+1461:        test_loader,
+1462:        criterion,
+1463:        device,
+1464:    )
+1465:
+1466:    print()
+1467:    print(
+1468:        f"OUTER FOLD {outer_fold} TEST"
+1469:    )
+1470:
+1471:    print(
+1472:        f"AUC                 : "
+1473:        f"{test_metrics['auc']:.6f}"
+1474:    )
+1475:
+1476:    print(
+1477:        f"Accuracy            : "
+1478:        f"{test_metrics['accuracy']:.6f}"
+1479:    )
+1480:
+1481:    print(
+1482:        f"Balanced Accuracy   : "
+1483:        f"{test_metrics['balanced_accuracy']:.6f}"
+1484:    )
+1485:
+1486:    print(
+1487:        f"Sensitivity         : "
+1488:        f"{test_metrics['recall']:.6f}"
+1489:    )
+1490:
+1491:    print(
+1492:        f"F1                  : "
+1493:        f"{test_metrics['f1']:.6f}"
+1494:    )
+1495:
+1496:    # --------------------------------------------------------
+1497:    # Source information
+1498:    # --------------------------------------------------------
+1499:
+1500:    source_lookup = (
+1501:        outer_test_df
+1502:        .set_index(
+1503:            "subject_id"
+1504:        )[
+1505:            "acquisition_source"
+1506:        ]
+1507:    )
+1508:
+1509:    source_values = [
+1510:        source_lookup.loc[
+1511:            subject_id
+1512:        ]
+1513:        for subject_id in test_subjects
+1514:    ]
+1515:
+1516:    # --------------------------------------------------------
+1517:    # Predictions
+1518:    # --------------------------------------------------------
+1519:
+1520:    prediction_df = pd.DataFrame(
+1521:        {
+1522:            "subject_id":
+1523:                test_subjects,
+1524:
+1525:            "label":
+1526:                test_labels,
+1527:
+1528:            "probability":
+1529:                test_probabilities,
+1530:
+1531:            "prediction":
+1532:                (
+1533:                    np.asarray(
+1534:                        test_probabilities
+1535:                    )
+1536:                    >= THRESHOLD
+1537:                ).astype(int),
+1538:
+1539:            "outer_fold":
+1540:                outer_fold,
+1541:
+1542:            "selected_epoch":
+1543:                selected_epoch,
+1544:
+1545:            "acquisition_source":
+1546:                source_values,
+1547:        }
+1548:    )
+1549:
+1550:    if prediction_df[
+1551:        "subject_id"
+1552:    ].duplicated().any():
+1553:
+1554:        raise RuntimeError(
+1555:            f"Outer fold {outer_fold}: "
+1556:            "duplicate test subjects."
+1557:        )
+1558:
+1559:    fold_dir = (
+1560:        OUTPUT_DIR
+1561:        / f"outer_fold_{outer_fold}"
+1562:    )
+1563:
+1564:    fold_dir.mkdir(
+1565:        parents=True,
+1566:        exist_ok=True,
+1567:    )
+1568:
+1569:    # --------------------------------------------------------
+1570:    # Save final model
+1571:    # --------------------------------------------------------
+1572:
+1573:    model_path = (
+1574:        fold_dir
+1575:        / "final_outer_model.pt"
+1576:    )
+1577:
+1578:    torch.save(
+1579:        {
+1580:            "model_state_dict":
+1581:                model.state_dict(),
+1582:
+1583:            "outer_fold":
+1584:                outer_fold,
+1585:
+1586:            "selected_epoch":
+1587:                selected_epoch,
+1588:
+1589:            "dropout":
+1590:                DROPOUT,
+1591:
+1592:            "input_shape":
+1593:                EXPECTED_TENSOR_SHAPE,
+1594:
+1595:            "random_seed":
+1596:                final_seed,
+1597:
+1598:            "pos_weight":
+1599:                pos_weight_value,
+1600:
+1601:            "experiment":
+1602:                EXPERIMENT_NAME,
+1603:
+1604:            "augmentation":
+1605:                {
+1606:                    "random_flip_probability":
+1607:                        0.5,
+1608:
+1609:                    "rotation_degrees":
+1610:                        5.0,
+1611:
+1612:                    "translation_voxels":
+1613:                        3,
+1614:                },
+1615:        },
+1616:        model_path,
+1617:    )
+1618:
+1619:    # --------------------------------------------------------
+1620:    # Save history
+1621:    # --------------------------------------------------------
+1622:
+1623:    history_df = pd.DataFrame(
+1624:        history
+1625:    )
+1626:
+1627:    history_df.to_csv(
+1628:        fold_dir
+1629:        / "final_outer_training_history.csv",
+1630:        index=False,
+1631:    )
+1632:
+1633:    # --------------------------------------------------------
+1634:    # Save predictions
+1635:    # --------------------------------------------------------
+1636:
+1637:    prediction_df.to_csv(
+1638:        fold_dir
+1639:        / "outer_test_predictions.csv",
+1640:        index=False,
+1641:    )
+1642:
+1643:    metrics_df = pd.DataFrame(
+1644:        [
+1645:            {
+1646:                "outer_fold":
+1647:                    outer_fold,
+1648:
+1649:                "test_subjects":
+1650:                    len(test_subjects),
+1651:
+1652:                "test_auc":
+1653:                    test_metrics["auc"],
+1654:
+1655:                "test_accuracy":
+1656:                    test_metrics["accuracy"],
+1657:
+1658:                "test_balanced_accuracy":
+1659:                    test_metrics[
+1660:                        "balanced_accuracy"
+1661:                    ],
+1662:
+1663:                "test_precision":
+1664:                    test_metrics["precision"],
+1665:
+1666:                "test_sensitivity":
+1667:                    test_metrics["recall"],
+1668:
+1669:                "test_f1":
+1670:                    test_metrics["f1"],
+1671:
+1672:                "selected_epoch":
+1673:                    selected_epoch,
+1674:
+1675:                "pos_weight":
+1676:                    pos_weight_value,
+1677:
+1678:                "final_seed":
+1679:                    final_seed,
+1680:            }
+1681:        ]
+1682:    )
+1683:
+1684:    metrics_df.to_csv(
+1685:        fold_dir
+1686:        / "outer_test_metrics.csv",
+1687:        index=False,
+1688:    )
+1689:
+1690:    return (
+1691:        test_metrics,
+1692:        prediction_df,
+1693:    )
+1694:
+1695:
+1696:# ============================================================
+1697:# LOAD AND VALIDATE ASSIGNMENTS
+1698:# ============================================================
+1699:
+1700:def load_assignments():
+1701:
+1702:    if not MANIFEST_PATH.exists():
+1703:
+1704:        raise FileNotFoundError(
+1705:            f"Manifest not found: "
+1706:            f"{MANIFEST_PATH}"
+1707:        )
+1708:
+1709:    if not NESTED_ASSIGNMENT_PATH.exists():
+1710:
+1711:        raise FileNotFoundError(
+1712:            f"Nested assignment not found: "
+1713:            f"{NESTED_ASSIGNMENT_PATH}"
+1714:        )
+1715:
+1716:    manifest = pd.read_csv(
+1717:        MANIFEST_PATH
+1718:    )
+1719:
+1720:    assignments = pd.read_csv(
+1721:        NESTED_ASSIGNMENT_PATH
+1722:    )
+1723:
+1724:    manifest["subject_id"] = (
+1725:        manifest[
+1726:            "subject_id"
+1727:        ].astype(str)
+1728:    )
+1729:
+1730:    assignments["subject_id"] = (
+1731:        assignments[
+1732:            "subject_id"
+1733:        ].astype(str)
+1734:    )
+1735:
+1736:    # --------------------------------------------------------
+1737:    # Manifest uniqueness
+1738:    # --------------------------------------------------------
+1739:
+1740:    if manifest[
+1741:        "subject_id"
+1742:    ].duplicated().any():
+1743:
+1744:        raise RuntimeError(
+1745:            "Manifest contains duplicate "
+1746:            "subject IDs."
+1747:        )
+1748:
+1749:    # --------------------------------------------------------
+1750:    # Assignment row count
+1751:    # --------------------------------------------------------
+1752:
+1753:    expected_rows = (
+1754:        len(manifest)
+1755:        * OUTER_FOLDS
+1756:        * INNER_FOLDS
+1757:    )
+1758:
+1759:    if len(assignments) != (
+1760:        expected_rows
+1761:    ):
+1762:
+1763:        raise RuntimeError(
+1764:            f"Expected {expected_rows} "
+1765:            f"nested assignment rows, "
+1766:            f"found {len(assignments)}."
+1767:        )
+1768:
+1769:    # --------------------------------------------------------
+1770:    # Assignment subjects
+1771:    # --------------------------------------------------------
+1772:
+1773:    if set(
+1774:        assignments[
+1775:            "subject_id"
+1776:        ]
+1777:    ) != set(
+1778:        manifest[
+1779:            "subject_id"
+1780:        ]
+1781:    ):
+1782:
+1783:        raise RuntimeError(
+1784:            "Assignment subjects do not "
+1785:            "match labeled manifest."
+1786:        )
+1787:
+1788:    # --------------------------------------------------------
+1789:    # Outer fold validation
+1790:    # --------------------------------------------------------
+1791:
+1792:    outer_counts = (
+1793:        assignments[
+1794:            [
+1795:                "subject_id",
+1796:                "outer_fold",
+1797:            ]
+1798:        ]
+1799:        .drop_duplicates()
+1800:        .groupby(
+1801:            "outer_fold"
+1802:        )[
+1803:            "subject_id"
+1804:        ]
+1805:        .nunique()
+1806:    )
+1807:
+1808:    if set(
+1809:        outer_counts.index
+1810:    ) != set(
+1811:        range(
+1812:            1,
+1813:            OUTER_FOLDS + 1,
+1814:        )
+1815:    ):
+1816:
+1817:        raise RuntimeError(
+1818:            "Invalid outer fold values."
+1819:        )
+1820:
+1821:    if not (
+1822:        outer_counts
+1823:        == 1
+1824:    ).all():
+1825:
+1826:        raise RuntimeError(
+1827:            "Each subject must have "
+1828:            "exactly one outer fold."
+1829:        )
+1830:
+1831:    print(
+1832:        f"Assignment rows: "
+1833:        f"{len(assignments)}"
+1834:    )
+1835:
+1836:    print(
+1837:        "Nested assignment "
+1838:        "validation: PASS"
+1839:    )
+1840:
+1841:    return (
+1842:        manifest,
+1843:        assignments,
+1844:    )
+1845:
+1846:
+1847:# ============================================================
+1848:# MAIN
+1849:# ============================================================
+1850:
+1851:def main():
+1852:
+1853:    print()
+1854:    print(
+1855:        "=" * 72
+1856:    )
+1857:
+1858:    print(
+1859:        "NeuroFusion AI - "
+1860:        "EXPERIMENT 02"
+1861:    )
+1862:
+1863:    print(
+1864:        "3D sMRI CNN + "
+1865:        "Training-Only Spatial Augmentation"
+1866:    )
+1867:
+1868:    print(
+1869:        "=" * 72
+1870:    )
+1871:
+1872:    print(
+1873:        f"Device: {DEVICE}"
+1874:    )
+1875:
+1876:    print(
+1877:        f"Output: {OUTPUT_DIR}"
+1878:    )
+1879:
+1880:    print()
+1881:
+1882:    set_seed(
+1883:        RANDOM_SEED
+1884:    )
+1885:
+1886:    # --------------------------------------------------------
+1887:    # Load assignments
+1888:    # --------------------------------------------------------
+1889:
+1890:    (
+1891:        manifest,
+1892:        assignments,
+1893:    ) = load_assignments()
+1894:
+1895:    # --------------------------------------------------------
+1896:    # Merge labels / metadata
+1897:    # --------------------------------------------------------
+1898:
+1899:    manifest_columns = [
+1900:        "subject_id",
+1901:        "label",
+1902:        "acquisition_source",
+1903:    ]
+1904:
+1905:    manifest_subset = (
+1906:        manifest[
+1907:            manifest_columns
+1908:        ]
+1909:        .drop_duplicates(
+1910:            subset=["subject_id"]
+1911:        )
+1912:        .copy()
+1913:    )
+1914:
+1915:    assignments = assignments.merge(
+1916:        manifest_subset,
+1917:        on="subject_id",
+1918:        how="left",
+1919:        validate="many_to_one",
+1920:    )
+1921:
+1922:    if assignments[
+1923:        "label"
+1924:    ].isna().any():
+1925:
+1926:        raise RuntimeError(
+1927:            "Missing labels after "
+1928:            "assignment merge."
+1929:        )
+1930:
+1931:    # --------------------------------------------------------
+1932:    # Validate image files
+1933:    # --------------------------------------------------------
+1934:
+1935:    missing_images = []
+1936:
+1937:    for subject_id in manifest[
+1938:        "subject_id"
+1939:    ].astype(str):
+1940:
+1941:        image_path = (
+1942:            IMAGE_DIR
+1943:            / f"{subject_id}.npy"
+1944:        )
+1945:
+1946:        if not image_path.exists():
+1947:
+1948:            missing_images.append(
+1949:                subject_id
+1950:            )
+1951:
+1952:    if missing_images:
+1953:
+1954:        raise RuntimeError(
+1955:            f"Missing CNN tensors: "
+1956:            f"{missing_images[:10]}"
+1957:        )
+1958:
+1959:    print(
+1960:        f"Subjects: "
+1961:        f"{manifest['subject_id'].nunique()}"
+1962:    )
+1963:
+1964:    print(
+1965:        f"Controls: "
+1966:        f"{(
+1967:            manifest['label'].astype(int) == 0
+1968:        ).sum()}"
+1969:    )
+1970:
+1971:    print(
+1972:        f"Schizophrenia: "
+1973:        f"{(
+1974:            manifest['label'].astype(int) == 1
+1975:        ).sum()}"
+1976:    )
+1977:
+1978:    print()
+1979:
+1980:    # --------------------------------------------------------
+1981:    # Save experiment configuration
+1982:    # --------------------------------------------------------
+1983:
+1984:    config_text = f"""
+1985:NeuroFusion AI
+1986:Experiment: {EXPERIMENT_NAME}
+1987:
+1988:Architecture:
+1989:    Baseline BatchNorm3D SMRI3DCNN
+1990:
+1991:Input:
+1992:    {EXPECTED_TENSOR_SHAPE}
+1993:
+1994:Nested CV:
+1995:    Outer folds: {OUTER_FOLDS}
+1996:    Inner folds: {INNER_FOLDS}
+1997:
+1998:Training:
+1999:    Batch size: {BATCH_SIZE}
+2000:    Maximum epochs: {NUM_EPOCHS}
+2001:    Learning rate: {LEARNING_RATE}
+2002:    Weight decay: {WEIGHT_DECAY}
+2003:    Dropout: {DROPOUT}
+2004:    Early stopping patience: {EARLY_STOPPING_PATIENCE}
+2005:
+2006:Augmentation:
+2007:    Training only: YES
+2008:    Validation augmentation: NO
+2009:    Outer test augmentation: NO
+2010:    Random left-right flip: p=0.5
+2011:    Random rotation: +/-5 degrees
+2012:    Random translation: +/-3 voxels
+2013:
+2014:Normalization:
+2015:    Existing normalized [0,1] tensors.
+2016:    No additional intensity augmentation.
+2017:
+2018:Seed:
+2019:    {RANDOM_SEED}
+2020:"""
+2021:
+2022:    (
+2023:        OUTPUT_DIR
+2024:        / "experiment_config.txt"
+2025:    ).write_text(
+2026:        config_text.strip()
+2027:        + "\n",
+2028:        encoding="utf-8",
+2029:    )
+2030:
+2031:    # --------------------------------------------------------
+2032:    # INNER CV
+2033:    # --------------------------------------------------------
+2034:
+2035:    all_inner_results = []
+2036:
+2037:    all_inner_histories = []
+2038:
+2039:    for outer_fold in range(
+2040:        1,
+2041:        OUTER_FOLDS + 1,
+2042:    ):
+2043:
+2044:        print()
+2045:        print(
+2046:            "#" * 72
+2047:        )
+2048:
+2049:        print(
+2050:            f"OUTER FOLD {outer_fold}"
+2051:        )
+2052:
+2053:        print(
+2054:            "#" * 72
+2055:        )
+2056:
+2057:        outer_df = (
+2058:            assignments[
+2059:                assignments[
+2060:                    "outer_fold"
+2061:                ]
+2062:                == outer_fold
+2063:            ]
+2064:            .copy()
+2065:        )
+2066:
+2067:        expected_subjects = (
+2068:            assignments[
+2069:                assignments[
+2070:                    "outer_fold"
+2071:                ]
+2072:                == outer_fold
+2073:            ][
+2074:                "subject_id"
+2075:            ]
+2076:            .nunique()
+2077:        )
+2078:
+2079:        if expected_subjects not in [
+2080:            34,
+2081:            35,
+2082:        ]:
+2083:
+2084:            raise RuntimeError(
+2085:                f"Unexpected outer fold "
+2086:                f"{outer_fold} size: "
+2087:                f"{expected_subjects}"
+2088:            )
+2089:
+2090:        outer_inner_results = []
+2091:
+2092:        for inner_fold in range(
+2093:            1,
+2094:            INNER_FOLDS + 1,
+2095:        ):
+2096:
+2097:            (
+2098:                result,
+2099:                history_df,
+2100:            ) = train_inner_fold(
+2101:                outer_fold,
+2102:                inner_fold,
+2103:                outer_df,
+2104:                DEVICE,
+2105:            )
+2106:
+2107:            outer_inner_results.append(
+2108:                result
+2109:            )
+2110:
+2111:            all_inner_results.append(
+2112:                result
+2113:            )
+2114:
+2115:            all_inner_histories.append(
+2116:                history_df
+2117:            )
+2118:
+2119:        # ----------------------------------------------------
+2120:        # Epoch selection
+2121:        # ----------------------------------------------------
+2122:
+2123:        selected_epoch = select_epoch(
+2124:            outer_inner_results,
+2125:            outer_fold,
+2126:        )
+2127:
+2128:        print()
+2129:        print(
+2130:            f"Outer {outer_fold} "
+2131:            f"selected epoch: "
+2132:            f"{selected_epoch}"
+2133:        )
+2134:
+2135:        # ----------------------------------------------------
+2136:        # Final outer model
+2137:        # ----------------------------------------------------
+2138:
+2139:        (
+2140:            test_metrics,
+2141:            prediction_df,
+2142:        ) = train_final_outer_model(
+2143:            outer_fold,
+2144:            outer_df,
+2145:            selected_epoch,
+2146:            DEVICE,
+2147:        )
+2148:
+2149:        # ----------------------------------------------------
+2150:        # Save epoch-selection record
+2151:        # ----------------------------------------------------
+2152:
+2153:        epoch_record = {
+2154:            "outer_fold":
+2155:                outer_fold,
+2156:
+2157:            "inner_best_epochs":
+2158:                ",".join(
+2159:                    str(
+2160:                        result[
+2161:                            "best_epoch"
+2162:                        ]
+2163:                    )
+2164:                    for result
+2165:                    in outer_inner_results
+2166:                ),
+2167:
+2168:            "inner_best_auc":
+2169:                ",".join(
+2170:                    f"{result['best_validation_auc']:.6f}"
+2171:                    for result
+2172:                    in outer_inner_results
+2173:                ),
+2174:
+2175:            "selected_epoch":
+2176:                selected_epoch,
+2177:        }
+2178:
+2179:        epoch_path = (
+2180:            OUTPUT_DIR
+2181:            / "epoch_selection.csv"
+2182:        )
+2183:
+2184:        if epoch_path.exists():
+2185:
+2186:            existing_epochs = (
+2187:                pd.read_csv(
+2188:                    epoch_path
+2189:                )
+2190:            )
+2191:
+2192:            existing_epochs = (
+2193:                existing_epochs[
+2194:                    existing_epochs[
+2195:                        "outer_fold"
+2196:                    ]
+2197:                    != outer_fold
+2198:                ]
+2199:            )
+2200:
+2201:            existing_epochs = pd.concat(
+2202:                [
+2203:                    existing_epochs,
+2204:                    pd.DataFrame(
+2205:                        [epoch_record]
+2206:                    ),
+2207:                ],
+2208:                ignore_index=True,
+2209:            )
+2210:
+2211:        else:
+2212:
+2213:            existing_epochs = pd.DataFrame(
+2214:                [epoch_record]
+2215:            )
+2216:
+2217:        existing_epochs = (
+2218:            existing_epochs
+2219:            .sort_values(
+2220:                "outer_fold"
+2221:            )
+2222:        )
+2223:
+2224:        existing_epochs.to_csv(
+2225:            epoch_path,
+2226:            index=False,
+2227:        )
+2228:
+2229:    # ========================================================
+2230:    # SAVE INNER RESULTS
+2231:    # ========================================================
+2232:
+2233:    inner_results_df = pd.DataFrame(
+2234:        all_inner_results
+2235:    )
+2236:
+2237:    inner_results_df = (
+2238:        inner_results_df
+2239:        .sort_values(
+2240:            [
+2241:                "outer_fold",
+2242:                "inner_fold",
+2243:            ]
+2244:        )
+2245:        .reset_index(drop=True)
+2246:    )
+2247:
+2248:    inner_results_df.to_csv(
+2249:        OUTPUT_DIR
+2250:        / "inner_cv_results.csv",
+2251:        index=False,
+2252:    )
+2253:
+2254:    # --------------------------------------------------------
+2255:    # Save all inner histories
+2256:    # --------------------------------------------------------
+2257:
+2258:    if all_inner_histories:
+2259:
+2260:        inner_history_df = pd.concat(
+2261:            all_inner_histories,
+2262:            ignore_index=True,
+2263:        )
+2264:
+2265:        inner_history_df.to_csv(
+2266:            OUTPUT_DIR
+2267:            / "inner_cv_training_histories.csv",
+2268:            index=False,
+2269:        )
+2270:
+2271:    # ========================================================
+2272:    # COLLECT OUTER PREDICTIONS
+2273:    # ========================================================
+2274:
+2275:    prediction_frames = []
+2276:
+2277:    fold_metrics = []
+2278:
+2279:    for outer_fold in range(
+2280:        1,
+2281:        OUTER_FOLDS + 1,
+2282:    ):
+2283:
+2284:        prediction_path = (
+2285:            OUTPUT_DIR
+2286:            / f"outer_fold_{outer_fold}"
+2287:            / "outer_test_predictions.csv"
+2288:        )
+2289:
+2290:        metrics_path = (
+2291:            OUTPUT_DIR
+2292:            / f"outer_fold_{outer_fold}"
+2293:            / "outer_test_metrics.csv"
+2294:        )
+2295:
+2296:        if not prediction_path.exists():
+2297:
+2298:            raise RuntimeError(
+2299:                f"Missing predictions: "
+2300:                f"{prediction_path}"
+2301:            )
+2302:
+2303:        if not metrics_path.exists():
+2304:
+2305:            raise RuntimeError(
+2306:                f"Missing metrics: "
+2307:                f"{metrics_path}"
+2308:            )
+2309:
+2310:        prediction_frames.append(
+2311:            pd.read_csv(
+2312:                prediction_path
+2313:            )
+2314:        )
+2315:
+2316:        fold_metrics.append(
+2317:            pd.read_csv(
+2318:                metrics_path
+2319:            )
+2320:        )
+2321:
+2322:    oof_predictions = pd.concat(
+2323:        prediction_frames,
+2324:        ignore_index=True,
+2325:    )
+2326:
+2327:    oof_predictions = (
+2328:        oof_predictions
+2329:        .sort_values(
+2330:            "subject_id"
+2331:        )
+2332:        .reset_index(drop=True)
+2333:    )
+2334:
+2335:    # --------------------------------------------------------
+2336:    # OOF uniqueness
+2337:    # --------------------------------------------------------
+2338:
+2339:    if oof_predictions[
+2340:        "subject_id"
+2341:    ].duplicated().any():
+2342:
+2343:        raise RuntimeError(
+2344:            "Duplicate OOF subjects."
+2345:        )
+2346:
+2347:    if len(
+2348:        oof_predictions
+2349:    ) != len(manifest):
+2350:
+2351:        raise RuntimeError(
+2352:            f"Expected {len(manifest)} "
+2353:            f"OOF predictions, found "
+2354:            f"{len(oof_predictions)}."
+2355:        )
+2356:
+2357:    # --------------------------------------------------------
+2358:    # OOF metrics
+2359:    # --------------------------------------------------------
+2360:
+2361:    oof_metrics = calculate_metrics(
+2362:        oof_predictions[
+2363:            "label"
+2364:        ].to_numpy(),
+2365:        oof_predictions[
+2366:            "probability"
+2367:        ].to_numpy(),
+2368:    )
+2369:
+2370:    oof_predictions.to_csv(
+2371:        OUTPUT_DIR
+2372:        / "nested_cv_oof_predictions.csv",
+2373:        index=False,
+2374:    )
+2375:
+2376:    fold_metrics_df = pd.concat(
+2377:        fold_metrics,
+2378:        ignore_index=True,
+2379:    )
+2380:
+2381:    fold_metrics_df.to_csv(
+2382:        OUTPUT_DIR
+2383:        / "nested_cv_fold_metrics.csv",
+2384:        index=False,
+2385:    )
+2386:
+2387:    # ========================================================
+2388:    # FINAL SUMMARY
+2389:    # ========================================================
+2390:
+2391:    fold_auc_mean = float(
+2392:        fold_metrics_df[
+2393:            "test_auc"
+2394:        ].mean()
+2395:    )
+2396:
+2397:    fold_auc_std = float(
+2398:        fold_metrics_df[
+2399:            "test_auc"
+2400:        ].std(
+2401:            ddof=0
+2402:        )
+2403:    )
+2404:
+2405:    summary = f"""
+2406:NeuroFusion AI
+2407:Experiment 02 - 3D sMRI CNN + Training-Only Spatial Augmentation
+2408:
+2409:FINAL STATUS: PASS
+2410:
+2411:Subjects evaluated:
+2412:    {len(oof_predictions)}
+2413:
+2414:Controls:
+2415:    {(oof_predictions['label'] == 0).sum()}
+2416:
+2417:Schizophrenia:
+2418:    {(oof_predictions['label'] == 1).sum()}
+2419:
+2420:Nested CV:
+2421:    5 outer folds
+2422:    4 inner folds
+2423:
+2424:Augmentation:
+2425:    Random left-right flip: p=0.5
+2426:    Random rotation: +/-5 degrees
+2427:    Random translation: +/-3 voxels
+2428:
+2429:Augmentation was applied ONLY to training datasets.
+2430:
+2431:Validation and outer-test datasets were NOT augmented.
+2432:
+2433:Overall OOF ROC-AUC:
+2434:    {oof_metrics['auc']:.6f}
+2435:
+2436:Overall OOF Accuracy:
+2437:    {oof_metrics['accuracy']:.6f}
+2438:
+2439:Overall OOF Balanced Accuracy:
+2440:    {oof_metrics['balanced_accuracy']:.6f}
+2441:
+2442:Overall OOF Precision:
+2443:    {oof_metrics['precision']:.6f}
+2444:
+2445:Overall OOF Sensitivity:
+2446:    {oof_metrics['recall']:.6f}
+2447:
+2448:Overall OOF F1:
+2449:    {oof_metrics['f1']:.6f}
+2450:
+2451:Mean outer-fold ROC-AUC:
+2452:    {fold_auc_mean:.6f}
+2453:
+2454:Population SD of outer-fold ROC-AUC:
+2455:    {fold_auc_std:.6f}
+2456:
+2457:Outer-fold AUC values:
+2458:"""
+2459:
+2460:    for _, row in fold_metrics_df.iterrows():
+2461:
+2462:        summary += (
+2463:            f"\n    Fold "
+2464:            f"{int(row['outer_fold'])}: "
+2465:            f"{row['test_auc']:.6f}"
+2466:        )
+2467:
+2468:    summary += "\n"
+2469:
+2470:    (
+2471:        OUTPUT_DIR
+2472:        / "nested_cv_summary.txt"
+2473:    ).write_text(
+2474:        summary.strip()
+2475:        + "\n",
+2476:        encoding="utf-8",
+2477:    )
+2478:
+2479:    # ========================================================
+2480:    # FINAL CONSOLE OUTPUT
+2481:    # ========================================================
+2482:
+2483:    print()
+2484:    print(
+2485:        "=" * 72
+2486:    )
+2487:
+2488:    print(
+2489:        "EXPERIMENT 02 COMPLETE"
+2490:    )
+2491:
+2492:    print(
+2493:        "=" * 72
+2494:    )
+2495:
+2496:    print(
+2497:        f"Subjects evaluated: "
+2498:        f"{len(oof_predictions)}"
+2499:    )
+2500:
+2501:    print(
+2502:        f"OOF ROC-AUC: "
+2503:        f"{oof_metrics['auc']:.6f}"
+2504:    )
+2505:
+2506:    print(
+2507:        f"OOF Accuracy: "
+2508:        f"{oof_metrics['accuracy']:.6f}"
+2509:    )
+2510:
+2511:    print(
+2512:        f"OOF Balanced Accuracy: "
+2513:        f"{oof_metrics['balanced_accuracy']:.6f}"
+2514:    )
+2515:
+2516:    print(
+2517:        f"Mean fold AUC: "
+2518:        f"{fold_auc_mean:.6f}"
+2519:    )
+2520:
+2521:    print(
+2522:        f"Fold AUC population SD: "
+2523:        f"{fold_auc_std:.6f}"
+2524:    )
+2525:
+2526:    print()
+2527:    print(
+2528:        "FINAL STATUS: PASS"
+2529:    )
+2530:
+2531:    print(
+2532:        f"Results saved to:"
+2533:    )
+2534:
+2535:    print(
+2536:        OUTPUT_DIR
+2537:    )
+2538:
+2539:
+2540:# ============================================================
+2541:# ENTRY POINT
+2542:# ============================================================
+2543:
+2544:if __name__ == "__main__":
+2545:
+2546:    main()

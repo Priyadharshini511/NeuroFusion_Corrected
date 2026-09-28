@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Raw / processed neuroimaging data
+processed_data/
+sub-01/
+sub-26/
+*.nii
+*.nii.gz
+*.dcm
+
+# Archives / datasets
+*.zip
+
+# Temporary / backup files
+*.bak
+*.bak2
+*.bak3
+*.bak4
+*.bak5
+
+# Dataset inventory / generated lists
+all_nii_list.txt
+all_subject_nii.txt
+external_nii_list.txt
+openneuro_file_inventory.txt
+1139_Demographics_20260804.csv
+
+# Logs / temporary output
+*.log
+*.tmp

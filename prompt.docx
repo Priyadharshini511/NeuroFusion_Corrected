@@ -1,0 +1,1007 @@
+You are working on my existing Windows project:
+
+C:\Users\User\Documents\neurofusion
+
+PROJECT GOAL
+------------
+I have 22 ZIP datasets in total.
+
+The first dataset, ScanData001, has already been completely processed manually and successfully.
+
+I now have 21 remaining ZIP datasets.
+
+Your task is to AUTOMATE the same validated sMRI preprocessing pipeline for the remaining datasets, while preserving the exact methodology already established in this project.
+
+IMPORTANT:
+Do NOT redesign the preprocessing pipeline.
+Do NOT introduce a different registration method.
+Do NOT replace HD-BET with another skull-stripping method.
+Do NOT download/use a different AAL atlas.
+Do NOT modify already successful outputs.
+First inspect the existing project and scripts, understand what has already been done, and then automate the remaining datasets.
+
+============================================================
+1. VALIDATED PIPELINE FROM SCANDATA001
+============================================================
+
+The first dataset was processed through the following workflow:
+
+RAW ZIP
+  ↓
+Temporary extraction
+  ↓
+Inspect dataset structure
+  ↓
+Identify structural MRI / MPRAGE
+  ↓
+DICOM → NIfTI conversion when required
+  ↓
+NIfTI inspection
+  ↓
+Reorientation
+  ↓
+N4 bias-field correction
+  ↓
+Intensity normalization where required by the existing workflow
+  ↓
+HD-BET brain extraction
+  ↓
+MNI152 2 mm affine registration
+  ↓
+Registration QC
+  ↓
+AAL SPM12 atlas
+  ↓
+Resample AAL atlas to exact MNI152 2 mm grid
+  ↓
+AAL atlas geometry verification
+  ↓
+AAL ROI mean-intensity feature extraction
+  ↓
+116 sMRI ROI features per subject
+  ↓
+Individual subject CSV files
+  ↓
+Combined sMRI feature matrix
+  ↓
+Final validation
+
+The first dataset successfully produced:
+
+21 subjects
+116 AAL ROI features per subject
+21 × 117 final matrix
+1 subject_id column + 116 ROI columns
+0 missing values
+0 duplicate subject IDs
+
+The first dataset is ScanData001.
+
+============================================================
+2. EXISTING PROJECT SCRIPTS
+============================================================
+
+Before modifying or creating anything, inspect the existing files under:
+
+C:\Users\User\Documents\neurofusion\src
+
+Important existing scripts include:
+
+inspect_cobre.py
+inspect_mprage.py
+check_mprage_sessions.py
+compare_mprage_sessions.py
+compare_echoes.py
+inspect_echo_metadata.py
+convert_mprage_to_nifti.py
+inspect_nifti.py
+batch_reorient_smri.py
+n4_bias_correction.py
+batch_n4.py
+intensity_normalization.py
+batch_hd_bet.py
+qc_hdbet.py
+visualize_hd_bet.py
+register_mni.py
+register_to_mni.py
+batch_register_mni.py
+qc_registration.py
+batch_qc_registration.py
+verify_aal_atlas.py
+resample_aal_to_mni.py
+extract_aal_features.py
+check_aal_features.py
+visualize_aal_features.py
+
+Do not blindly recreate these scripts.
+
+Read them first and reuse the validated logic wherever possible.
+
+If an existing script is single-subject only, create a batch/automation wrapper around it rather than changing the validated algorithm unnecessarily.
+
+============================================================
+3. INPUT DATA
+============================================================
+
+There are 22 ZIP datasets.
+
+ScanData001 has already been completed.
+
+Process only the remaining 21 datasets.
+
+The ZIP files may have different internal folder structures.
+
+Therefore, for every ZIP:
+
+1. Identify the ZIP.
+2. Extract it into a temporary working directory.
+3. Inspect its directory structure.
+4. Identify the actual structural MRI/MPRAGE data.
+5. Determine whether it is DICOM or NIfTI.
+6. Determine the correct MRI session/sequence.
+7. Process only the correct structural MRI.
+
+Do NOT assume that every ZIP has exactly the same internal structure.
+
+Do NOT process unrelated MRI sequences such as functional MRI, resting-state fMRI, diffusion MRI, field maps, or other scans as structural MRI.
+
+============================================================
+4. TEMPORARY EXTRACTION
+============================================================
+
+Use a temporary extraction area such as:
+
+C:\Users\User\Documents\neurofusion\temp_folder
+
+For example:
+
+temp_folder\
+    ScanData002\
+    ScanData003\
+    ...
+
+Only one dataset needs to be actively extracted at a time if possible.
+
+This is important because disk space should be conserved.
+
+After a dataset has been completely processed and verified, its temporary extracted raw folder may be deleted.
+
+However:
+
+NEVER delete processed_data.
+
+NEVER delete the final feature CSVs.
+
+NEVER delete the MNI registered images before verification.
+
+NEVER delete transforms or QC outputs before verification.
+
+============================================================
+5. SUBJECT IDENTIFICATION
+============================================================
+
+For every dataset:
+
+- Detect all valid structural MRI subjects.
+- Determine the subject ID from the existing dataset naming convention.
+- Preserve the original subject ID wherever possible.
+- Do not invent random subject IDs.
+- Do not silently rename subjects.
+
+If a subject ID already exists in the processed feature matrix, check whether it is genuinely the same subject/data.
+
+Do not create duplicate rows for the same subject.
+
+If the same subject appears more than once because of multiple MRI sessions, inspect the sessions and use the same selection logic already established for ScanData001.
+
+If the correct session cannot be determined automatically, STOP and report the ambiguity rather than choosing randomly.
+
+============================================================
+6. DICOM → NIFTI
+============================================================
+
+If the structural MRI is in DICOM format:
+
+Use the existing conversion workflow/script:
+
+src\convert_mprage_to_nifti.py
+
+Do not use an unrelated conversion pipeline unless the existing script cannot handle the dataset.
+
+Store converted NIfTI files under the existing project structure:
+
+processed_data\smri\dicom_nifti\
+
+Inspect the converted NIfTI.
+
+Check:
+
+- shape
+- voxel spacing
+- orientation
+- anatomical coverage
+- whether the image is actually structural MRI
+
+============================================================
+7. NIFTI INSPECTION
+============================================================
+
+Use the existing inspection functionality:
+
+src\inspect_nifti.py
+
+The automation should verify that the structural MRI is valid before continuing.
+
+If a NIfTI is corrupted, empty, obviously incomplete, or not the expected anatomical scan:
+
+- mark that subject as FAILED
+- record the reason
+- continue with other subjects if possible
+- do not silently continue with invalid data
+
+============================================================
+8. REORIENTATION
+============================================================
+
+Use the established reorientation workflow:
+
+src\batch_reorient_smri.py
+
+Keep the orientation procedure consistent with ScanData001.
+
+Do not introduce a new orientation convention.
+
+============================================================
+9. N4 BIAS FIELD CORRECTION
+============================================================
+
+Use the existing N4 workflow:
+
+src\n4_bias_correction.py
+src\batch_n4.py
+
+Apply N4 bias-field correction consistently to the structural MRI.
+
+Store outputs under:
+
+processed_data\smri\n4\
+
+If output already exists and is valid:
+
+SKIP it.
+
+Do not recompute unnecessarily.
+
+============================================================
+10. INTENSITY NORMALIZATION
+============================================================
+
+Use the existing project implementation:
+
+src\intensity_normalization.py
+
+Maintain consistency with the ScanData001 workflow.
+
+Do not introduce arbitrary z-score/min-max normalization unless the existing project script explicitly does this.
+
+If normalization is already complete for a subject, skip it.
+
+============================================================
+11. HD-BET BRAIN EXTRACTION
+============================================================
+
+Use HD-BET exactly as established in the project.
+
+Primary script:
+
+src\batch_hd_bet.py
+
+HD-BET is the chosen brain extraction method for this project.
+
+Do NOT replace it with FSL BET.
+
+Store outputs under:
+
+processed_data\smri\hd_bet\
+
+Expected naming convention:
+
+<subject_id>_brain.nii.gz
+
+For every subject, verify that:
+
+- output exists
+- image is readable
+- dimensions are reasonable
+- brain extraction did not produce an empty image
+
+Use existing QC scripts where appropriate:
+
+src\qc_hdbet.py
+src\visualize_hd_bet.py
+
+If HD-BET fails for a subject:
+
+- record failure
+- do not proceed to MNI registration for that subject
+- continue with other subjects
+
+============================================================
+12. MNI152 2 MM TEMPLATE
+============================================================
+
+The project uses:
+
+processed_data\smri\mni\mni152_template_2mm.nii.gz
+
+This is the REQUIRED MNI template.
+
+Expected geometry:
+
+Size:
+(99, 117, 95)
+
+Spacing:
+(2.0, 2.0, 2.0)
+
+Origin:
+(98.0, 134.0, -72.0)
+
+Direction:
+(-1.0, 0.0, 0.0,
+ 0.0, -1.0, 0.0,
+ 0.0, 0.0, 1.0)
+
+Do not replace this template with another MNI template.
+
+============================================================
+13. MNI AFFINE REGISTRATION
+============================================================
+
+Use the established SimpleITK affine registration workflow.
+
+Primary scripts:
+
+src\register_mni.py
+src\batch_register_mni.py
+
+The registration methodology established in ScanData001 is:
+
+- SimpleITK
+- 3D affine transformation
+- CenteredTransformInitializer
+- GEOMETRY initialization
+- Mattes Mutual Information
+- Random metric sampling
+- Linear interpolation
+- Multi-resolution registration
+- Shrink factors:
+  [4, 2, 1]
+- Smoothing sigmas:
+  [2, 1, 0]
+- Gradient descent optimizer
+- 100 iterations as established in the existing script
+- physical-shift optimizer scales
+
+Do not change these settings without a specific technical reason.
+
+Input:
+
+processed_data\smri\hd_bet\<subject_id>_brain.nii.gz
+
+Output:
+
+processed_data\smri\registered\<subject_id>_mni.nii.gz
+
+Transformation:
+
+processed_data\smri\transforms\<subject_id>_to_mni.tfm
+
+The registered output MUST have:
+
+Size:
+(99, 117, 95)
+
+Spacing:
+(2.0, 2.0, 2.0)
+
+If registration output already exists and passes verification:
+
+SKIP registration.
+
+Do not overwrite it.
+
+============================================================
+14. REGISTRATION QC
+============================================================
+
+Run registration QC for every registered subject.
+
+Use:
+
+src\batch_qc_registration.py
+
+Store QC images under:
+
+processed_data\smri\qc_registration_batch\
+
+Every registered subject must have a QC result.
+
+Check:
+
+- anatomical alignment
+- brain position
+- orientation
+- obvious registration failures
+- gross displacement
+- missing/cropped brain regions
+
+A successful Python execution is NOT sufficient by itself.
+
+The output must also have correct MNI geometry.
+
+If a subject fails QC:
+
+- mark it as FAILED_QC
+- do not extract final AAL features from it
+- record the subject and reason
+
+============================================================
+15. AAL SPM12 ATLAS
+============================================================
+
+The project uses the AAL SPM12 atlas.
+
+Original atlas directory:
+
+processed_data\smri\atlas\aal_SPM12\
+
+Important original atlas files include:
+
+ROI_MNI_V4.nii
+AAL.nii
+
+The original AAL atlas does NOT have the exact same geometry as the MNI152 2 mm template.
+
+Therefore:
+
+DO NOT directly use the original AAL atlas for final extraction.
+
+============================================================
+16. AAL → MNI GRID RESAMPLING
+============================================================
+
+The validated workflow creates:
+
+processed_data\smri\atlas\aal_mni\AAL_MNI152_2mm.nii.gz
+
+Use:
+
+src\resample_aal_to_mni.py
+
+The atlas MUST be resampled using:
+
+NEAREST NEIGHBOR interpolation.
+
+This is essential because AAL contains discrete ROI labels.
+
+The resampled atlas MUST exactly match the MNI template in:
+
+- Size
+- Spacing
+- Origin
+- Direction
+
+Expected geometry:
+
+Size:
+(99, 117, 95)
+
+Spacing:
+(2.0, 2.0, 2.0)
+
+Origin:
+(98.0, 134.0, -72.0)
+
+Direction:
+(-1.0, 0.0, 0.0,
+ 0.0, -1.0, 0.0,
+ 0.0, 0.0, 1.0)
+
+============================================================
+17. AAL ATLAS VERIFICATION
+============================================================
+
+Before extracting features, run:
+
+src\verify_aal_atlas.py
+
+Expected result:
+
+Size      : PASS
+Spacing   : PASS
+Origin    : PASS
+Direction : PASS
+
+The atlas should contain:
+
+116 non-zero ROI labels.
+
+Expected label range:
+
+Minimum label: 2001
+Maximum label: 9170
+
+If atlas verification fails:
+
+STOP feature extraction.
+
+Do not try to "fix" the atlas automatically by using a different atlas.
+
+============================================================
+18. AAL ROI FEATURE EXTRACTION
+============================================================
+
+Use the verified atlas:
+
+processed_data\smri\atlas\aal_mni\AAL_MNI152_2mm.nii.gz
+
+Use the existing extraction implementation:
+
+src\extract_aal_features.py
+
+The feature type is:
+
+MEAN MRI INTENSITY WITHIN EACH AAL ROI
+
+Each subject must produce:
+
+116 sMRI ROI features.
+
+Feature naming convention:
+
+sMRI_AAL_<ROI_LABEL>
+
+Examples:
+
+sMRI_AAL_2001
+sMRI_AAL_2002
+sMRI_AAL_2101
+...
+
+Do not standardize each subject's ROI values independently unless the existing extraction script explicitly does so.
+
+The feature values should represent the mean intensity within each AAL ROI.
+
+Store individual subject CSV files under:
+
+processed_data\smri\features\aal\
+
+Example:
+
+A00000300_aal_features.csv
+
+============================================================
+19. COMBINED FEATURE MATRIX
+============================================================
+
+Create/update:
+
+processed_data\smri\features\aal\COBRE_AAL_sMRI_features.csv
+
+Expected structure:
+
+subject_id
+sMRI_AAL_2001
+sMRI_AAL_2002
+...
+sMRI_AAL_9170
+
+There must be:
+
+1 subject_id column
++
+116 ROI feature columns
+
+Therefore:
+
+117 total columns.
+
+Do NOT blindly overwrite the combined matrix.
+
+The automation should:
+
+1. Load the existing matrix if present.
+2. Determine which subjects are already included.
+3. Add only new successfully processed subjects.
+4. Prevent duplicate subject IDs.
+5. Preserve existing successful rows.
+6. Keep the feature-column order identical across all datasets.
+
+============================================================
+20. IMPORTANT: DATASET-BY-DATASET PROCESSING
+============================================================
+
+Process the remaining ZIP files ONE DATASET AT A TIME.
+
+For example:
+
+ScanData002
+ScanData003
+ScanData004
+...
+through the remaining datasets.
+
+For each dataset:
+
+EXTRACT
+→ INSPECT
+→ IDENTIFY MRI
+→ CONVERT
+→ REORIENT
+→ N4
+→ NORMALIZE
+→ HD-BET
+→ HD-BET QC
+→ MNI REGISTRATION
+→ REGISTRATION QC
+→ AAL VERIFICATION
+→ AAL FEATURE EXTRACTION
+→ FEATURE VALIDATION
+→ CLEAN TEMPORARY DATA
+
+Do not move to the next dataset until the current dataset has either:
+
+SUCCESSFULLY COMPLETED
+
+or
+
+FAILED WITH A CLEAR LOGGED REASON.
+
+============================================================
+21. RESUME / SKIP LOGIC
+============================================================
+
+The automation MUST be resumable.
+
+If the process is interrupted:
+
+DO NOT restart everything from the beginning.
+
+For every stage, check whether the expected output already exists and is valid.
+
+Examples:
+
+If N4 output exists:
+    skip N4.
+
+If HD-BET output exists:
+    skip HD-BET.
+
+If MNI registration output exists:
+    verify geometry and skip registration if valid.
+
+If registration QC exists:
+    do not regenerate unnecessarily.
+
+If individual AAL feature CSV exists:
+    verify it and skip extraction if valid.
+
+If subject already exists in combined feature matrix:
+    do not add duplicate row.
+
+This is essential because the processing is computationally expensive on a CPU-only college PC.
+
+============================================================
+22. ERROR HANDLING
+============================================================
+
+Never silently ignore errors.
+
+Create a processing log, for example:
+
+processed_data\smri\processing_logs\
+
+Possible files:
+
+smri_batch_processing_log.csv
+smri_failed_subjects.csv
+smri_dataset_summary.csv
+
+Record:
+
+- dataset
+- subject_id
+- stage
+- status
+- input
+- output
+- error/reason
+- timestamp if practical
+
+Possible status values:
+
+SUCCESS
+SKIPPED_ALREADY_EXISTS
+FAILED
+FAILED_QC
+FAILED_GEOMETRY
+
+A single failed subject must NOT necessarily stop the entire batch.
+
+Continue processing other valid subjects unless the failure indicates a global pipeline problem.
+
+============================================================
+23. FINAL VALIDATION FOR EACH DATASET
+============================================================
+
+At the end of every dataset, print a summary similar to:
+
+============================================================
+DATASET SUMMARY
+============================================================
+
+Dataset:
+ScanData002
+
+Subjects discovered:
+XX
+
+Subjects successfully processed:
+XX
+
+DICOM → NIfTI successful:
+XX
+
+N4 successful:
+XX
+
+HD-BET successful:
+XX
+
+MNI registration successful:
+XX
+
+Registration QC passed:
+XX
+
+AAL feature extraction successful:
+XX
+
+Failed:
+XX
+
+116 ROI features per subject:
+YES
+
+Missing feature values:
+0
+
+Duplicate subjects:
+0
+
+============================================================
+
+Do not declare a dataset complete if required stages have failed.
+
+============================================================
+24. FINAL GLOBAL VALIDATION
+============================================================
+
+After all remaining datasets have been processed, validate:
+
+1. Number of datasets processed.
+2. Number of subjects.
+3. Number of individual subject feature CSVs.
+4. Number of rows in combined matrix.
+5. Number of columns.
+6. Number of ROI features.
+7. Missing values.
+8. Duplicate subject IDs.
+9. Invalid/failed subjects.
+10. MNI geometry consistency.
+11. AAL geometry consistency.
+
+The final feature matrix must have:
+
+117 columns
+
+consisting of:
+
+1 subject_id
++
+116 AAL sMRI features.
+
+Run checks equivalent to:
+
+Shape
+Subjects
+Missing values
+Duplicate subjects
+
+For example:
+
+python -c "import pandas as pd; p='processed_data\\smri\\features\\aal\\COBRE_AAL_sMRI_features.csv'; df=pd.read_csv(p); print('Shape:',df.shape); print('Subjects:',df['subject_id'].nunique()); print('Missing values:',df.isna().sum().sum()); print('Duplicate subjects:',df['subject_id'].duplicated().sum())"
+
+============================================================
+25. DO NOT DELETE IMPORTANT DATA
+============================================================
+
+Temporary extracted raw folders MAY be deleted only after successful verification.
+
+The following MUST NOT be deleted:
+
+processed_data\smri\n4\
+processed_data\smri\normalized\
+processed_data\smri\hd_bet\
+processed_data\smri\mni\
+processed_data\smri\registered\
+processed_data\smri\transforms\
+processed_data\smri\qc_registration_batch\
+processed_data\smri\atlas\
+processed_data\smri\features\
+
+Especially preserve:
+
+processed_data\smri\features\aal\COBRE_AAL_sMRI_features.csv
+
+and all:
+
+<subject_id>_aal_features.csv
+
+============================================================
+26. DO NOT TOUCH THE VALIDATED SCANDATA001 OUTPUTS
+============================================================
+
+ScanData001 has already been processed successfully.
+
+Treat its outputs as the reference/validated result.
+
+Do not delete or overwrite its processed files.
+
+Do not rerun expensive processing on it unless explicitly required for validation.
+
+Use its processing structure and output conventions as the reference for all remaining datasets.
+
+============================================================
+27. AUTOMATION SCRIPT
+============================================================
+
+After inspecting the current project, create an appropriate master automation script, preferably:
+
+src\run_all_smri_datasets.py
+
+or another clearly named script.
+
+The master script should:
+
+- discover remaining ZIP files
+- exclude ScanData001
+- process one dataset at a time
+- use the existing scripts/functions where appropriate
+- check outputs before processing
+- resume safely
+- log failures
+- perform validation after every major stage
+- update the combined feature matrix
+- clean temporary folders only after successful completion
+- print a clear progress summary
+
+Do not duplicate large amounts of existing code unnecessarily.
+
+If an existing script needs a small modification to support batch automation, preserve its validated algorithm and only add the required batch functionality.
+
+============================================================
+28. BEFORE RUNNING
+============================================================
+
+FIRST:
+
+1. Inspect the complete project directory.
+2. Inspect all existing src scripts relevant to sMRI.
+3. Identify where the remaining ZIP files are located.
+4. Identify ScanData001.
+5. Inspect its existing outputs.
+6. Verify that the existing AAL atlas and MNI template are available.
+7. Verify Python environment and required packages.
+8. Determine whether the existing scripts are compatible with batch automation.
+
+Do NOT immediately start processing.
+
+First give me a short report containing:
+
+- ZIP files found
+- ScanData001 status
+- remaining datasets
+- existing processed outputs
+- scripts you will reuse
+- scripts you will create/modify
+- any ambiguities detected
+
+Then implement the automation.
+
+============================================================
+29. CRITICAL SAFETY RULE
+============================================================
+
+If you encounter uncertainty about:
+
+- which MRI sequence is structural
+- which session to use
+- subject identity
+- multiple competing MPRAGE scans
+- corrupted data
+- registration failure
+- atlas mismatch
+- unexpected image geometry
+
+DO NOT guess.
+
+Stop that subject/dataset, record the issue clearly, and continue only where the decision is unambiguous.
+
+============================================================
+30. SUCCESS CRITERIA
+============================================================
+
+The automation is considered successful only when:
+
+- All intended remaining ZIP datasets have been processed.
+- All valid structural MRI subjects have been handled.
+- MNI registration has been completed for valid subjects.
+- Registration QC has been generated.
+- AAL atlas matches the MNI grid.
+- Each successful subject has exactly 116 AAL ROI features.
+- Individual feature CSVs exist.
+- Combined feature matrix exists.
+- No missing feature values exist unless explicitly documented.
+- No duplicate subject IDs exist.
+- Processing logs exist.
+- Failed subjects/datasets are clearly reported.
+- Temporary raw extraction folders are cleaned only after successful verification.
+
+FINAL EXPECTED WORKFLOW:
+
+Remaining ZIP files
+        ↓
+Temporary extraction
+        ↓
+MRI identification
+        ↓
+DICOM → NIfTI
+        ↓
+Reorientation
+        ↓
+N4 bias correction
+        ↓
+Intensity normalization
+        ↓
+HD-BET
+        ↓
+HD-BET QC
+        ↓
+MNI152 2 mm affine registration
+        ↓
+Registration QC
+        ↓
+Verified AAL SPM12 atlas
+        ↓
+AAL → MNI 2 mm grid
+        ↓
+AAL geometry verification
+        ↓
+116 ROI mean-intensity features
+        ↓
+Individual CSVs
+        ↓
+Combined feature matrix
+        ↓
+Final validation
+        ↓
+Delete temporary extracted raw folder
+        ↓
+Next ZIP dataset
+
+IMPORTANT:
+Do not proceed to any multimodal fusion, EEG feature extraction, machine learning, classification, or final NeuroFusion model yet.
+
+For now, the task is ONLY to automate and complete the sMRI preprocessing + AAL feature extraction pipeline for the remaining 21 ZIP datasets while preserving the validated ScanData001 workflow.
